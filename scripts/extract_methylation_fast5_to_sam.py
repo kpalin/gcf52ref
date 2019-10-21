@@ -149,10 +149,10 @@ class MethylFile(object):
                 Mdf["mod_posteriors"] = np.nan
                 Mdf.loc[base_indices,"mod_posteriors"] = phred_posteriors
                 CpG_idx = [x.start() for x in re.finditer("C(?=G)",SEQ)]
-                CpG_likelihood = (Mdf.loc[CpG_idx,"mod_posteriors"]).astype(np.uint8)
+                CpG_posterior = (Mdf.loc[CpG_idx,"mod_posteriors"]).astype(np.uint8)
                 #log.info("Likelihoods:CpG:"+str(Mdf.loc[CpG_idx,"Z"]))
                 self._cpg_total += len(CpG_idx)
-                self._cpg_meth += (CpG_likelihood>=MIN_PHRED).sum()
+                self._cpg_meth += (CpG_posterior>=MIN_PHRED).sum()
 
                 if (self._read_count+1)%1000 == 0 :
                     log.info("MeanCpGmeth: {}%".format(self._cpg_meth*100.0/self._cpg_total))
@@ -166,11 +166,11 @@ class MethylFile(object):
                 #if (self._read_count+1)%1000 == 0 :
                 #    log.info("70%meth:"+str(pd.Series(self._quantiles).describe()))
 
-                l_count = CpG_likelihood.value_counts()
+                l_count = CpG_posterior.value_counts()
                 self._ll_distrib[l_count.index] += l_count
                 if (self._read_count+1)%1000 == 0 :
                     X=self._ll_distrib[self._ll_distrib>0].copy()
-                    log.info("meth_LL_prop:"+(str(X.sort_index().cumsum()/X.sum())))
+                    log.info("meth_PhredPosterior_prop:"+(str(X.sort_index().cumsum()/X.sum())))
 
 
         if len(MMtag)>0:
