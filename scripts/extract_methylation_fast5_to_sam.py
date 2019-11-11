@@ -20,6 +20,13 @@ def main():
     #parser.add_argument("-p", "--processes",type=int,
     #                    help="Database to store the modifications to  [default:%(default)s]",
     #                    default=1)
+
+    parser.add_argument("-L", "--likelihoods",default=False,action="store_true",
+                        help="Include also the raw likelihoods [default:%(default)s]" )
+
+    parser.add_argument("-F", "--filter",default=False,const=7.0, nargs="?",type=float,
+                        help="Mark reads with average q less than this as vendor failed [default:%(default)s]" )
+
     parser.add_argument("-V", "--verbose",default=False,action="store_true",
                         help="Be more verbose with output [default:%(default)s]" )
 
@@ -35,8 +42,19 @@ def main():
 
 
 class MethylFile(object):
-    def __init__(self,out_strm=None ):
+
+
+    _KNOWN_MODIFICATIONS = {"5mC":(b'C','m'),
+                            "6mA":(b'A','a')}
+
+    def __init__(self,out_strm=None, output_likelihoods=[], filter_mean_q = False ):
+        """out_strm: Output stream for the sam file, default sys.stdout,
+        output_likelihoods:  Output the raw likelihoods for the given modifications"""
         import sys
+
+        self._output_likelihoods = output_likelihoods
+        self._filter_mean_q = filter_mean_q
+
         if out_strm is None:
             self._out_strm = sys.stdout
         else:
@@ -77,42 +95,41 @@ class MethylFile(object):
 
     def __len__(self):
         "Return number of reads outputted"
-        return self._read_count
-    
-    def write_read(self,QNAME,SEQ,QUAL,mod_base_table,mod_base_indices={b"C":(3,"m")}):
-        """mod_base_indices = dict(UNMODIFIED_BASE = (COLUMN_INDEX,BASE_MOD_SYMBOL))
-        
-        The methylation is reported as described in https://283-3666509-gh.circle-artifacts.com/0/root/project/pdfs/SAMtags.pdf
+        return self._read_count 
+
+
+    def get_ml_tag(self,mod_base_table):
+        """Return modification likelihoods in hex string tags such that ml:Z:C+m,ffff04,A+a,000093. 
+        The syntax is 
+
+        ml:Z:([ACGTN][-+][a-z],([0-9a-f][0-9a-f])+);)+
+
+        ml is the custom SAM tag, Z symbol for character string value. Next three groupings are as in 'Base modifications' in  https://github.com/samtools/hts-specs/pull/418
+        Final group is the hex coded likelihood for the given type modification for each position in SEQ in the original strand. Note that the likelihoods are
+        given when the underlying base is called the one defined in the tag. Each hexadecimal value is 255*P(data|base, modified)
         """
-        import numpy as np
+        ml_tag = ["ml:Z:"]
+        for base_mod_long in self._output_likelihoods:
+            base_mod = self._modified_base_names[base_mod_long]
+            mod_likelihoods = mod_base_table[slice(None), base_mod.column_index]
+            mod_data = "{}+{},{};".format(base_mod.unmodified_base.decode("ascii"),base_mod.symbol,mod_likelihoods.data.hex())
+            ml_tag.append(mod_data)
 
-        if self._read_count == 0 :
-            self.write_header()
+        return "".join(ml_tag)
+ 
 
-        # TODO: avoid repeating these
-        FLAG=0x4
-        RNAME="*"
-        POS=0
-        MAPQ=255
-        CIGAR="*"
-        RNEXT="*"
-        PNEXT=0
-        TLEN=0
-
-        tags = [f"RG:Z:{self._rgid}"]
-
-        line = list(str(x) for x in [QNAME,FLAG,RNAME,POS,MAPQ,CIGAR,RNEXT,PNEXT,TLEN,SEQ,QUAL])
-        #end TODO
-        
+    def get_mm_mp_tags(self,mod_base_table,SEQ,mod_base_indices={b"C":(3,"m")}):
+        "Return list of MM and MP tags conforming to https://github.com/samtools/hts-specs/pull/418/commits/11d7fb900b6d51417f59d7cd2cc8540c1b982590"
         # Require at least phred score 3 for modification to be called. That is at most 66% probability of error.
         # Other option would be phred score 4 with 45% error rate.
-
+        import numpy as np
         MIN_PHRED = 3 
 
+        tags = []
         MPtag = []
         MMtag = []
         for unmod_base,(mod_index,mod_symbol) in mod_base_indices.items():
-            base_indices = np.fromstring(SEQ,"|S1")==unmod_base
+            base_indices = np.frombuffer(SEQ.encode("ascii"), dtype=np.uint8)==np.frombuffer(unmod_base,dtype=np.uint8)
 
             
             mod_likelihoods = mod_base_table[base_indices, mod_index]
@@ -176,7 +193,36 @@ class MethylFile(object):
         if len(MMtag)>0:
             tags.append("MM:Z:"+";".join(MMtag))
             tags.append("MP:Z:"+"".join(MPtag))
+        
+        return tags
 
+ 
+    def write_read(self,QNAME,SEQ,QUAL,tags = [],flags = 0 ):
+        """mod_base_indices = dict(UNMODIFIED_BASE = (COLUMN_INDEX,BASE_MOD_SYMBOL))
+        
+        The methylation is reported as described in https://283-3666509-gh.circle-artifacts.com/0/root/project/pdfs/SAMtags.pdf
+        """
+        import numpy as np
+
+        if self._read_count == 0 :
+            self.write_header()
+
+        # TODO: avoid repeating these
+        FLAG=0x4|flags
+        RNAME="*"
+        POS=0
+        MAPQ=255
+        CIGAR="*"
+        RNEXT="*"
+        PNEXT=0
+        TLEN=0
+
+        tags = [f"RG:Z:{self._rgid}"] + tags
+
+        line = list(str(x) for x in [QNAME,FLAG,RNAME,POS,MAPQ,CIGAR,RNEXT,PNEXT,TLEN,SEQ,QUAL])
+        
+       
+        
         self._out_strm.write("\t".join(line+tags)+"\n")
 
         
@@ -192,11 +238,15 @@ class MethylFile(object):
         from ont_fast5_api.fast5_interface import get_fast5_file
         import numpy as np
         import logging as log
+        
+        def tqdm(x):
+            return x
         if verbose:
-            from tqdm import tqdm
-        else:
-            def tqdm(x):
-                return x
+            try:
+                from tqdm import tqdm
+            except ModuleNotFoundError:
+                pass
+            
 
         log.info("Processing file {}".format(fast5_filepath))
 
@@ -206,7 +256,9 @@ class MethylFile(object):
         BASE = UNMODIFIED_BASES[mod_index]
 
         log.info("Looking for modification {} of base {}.".format(mod_index,BASE))
-
+        from collections import namedtuple
+        BaseMod = namedtuple("BaseMod","column_index shortName longName symbol unmodified_base")
+        flags = 0
         with get_fast5_file(fast5_filepath, mode="r") as f5:
             for read_id in tqdm(f5.get_read_ids()):
                 #if read_idx%100:
@@ -221,9 +273,16 @@ class MethylFile(object):
                     self._mod_attributes = read.get_analysis_attributes(analysis_id + "/BaseCalled_template/ModBaseProbs")
                     self._basecall_attributes = read.get_analysis_attributes(analysis_id)
                     self._tracking_id = read.get_tracking_id()
+                    self._output_alphabet = read.get_analysis_attributes(analysis_id+"/output_alphabet")
+
+                    _snames = ( (i,x) for i,x in enumerate(self._mod_attributes["output_alphabet"]) if x  not in "ACGT")
+                    _lnames =  self._mod_attributes["modified_base_long_names"].split()
+                    self._modified_base_names = {lname:BaseMod(i,sname,lname,self._KNOWN_MODIFICATIONS[lname][1], self._KNOWN_MODIFICATIONS[lname][0])  for (i,sname),lname in zip(_snames,_lnames) }
+
                     log.info(str(self._mod_attributes))
                     log.info(str(self._basecall_attributes))
                     log.info(str(self._tracking_id))
+                    log.info(str(self._modified_base_names))
 
 
                 mod_base_table = read.get_analysis_dataset(
@@ -243,13 +302,28 @@ class MethylFile(object):
                 
                 # import pandas as pd
                 # Mdf = pd.DataFrame(mod_base_table,index=list(SEQ),columns=list(self._mod_attributes["output_alphabet"]))
-                self.write_read(read_id,seq,qvals,mod_base_table)
+                tags = self.get_mm_mp_tags(mod_base_table,seq)
+
+                if len(self._output_likelihoods)>0:
+                    tags.append(self.get_ml_tag(mod_base_table))
+
+                if self._filter_mean_q:
+                    summary = read.get_summary_data(analysis_id)
+                    if summary["basecall_1d_template"]["mean_qscore"] < self._filter_mean_q:
+                        flags = 0x200  # QCFAIL   not passing quality controls
+                    else:
+                        flags = 0 
+                
+                    
+
+                self.write_read(read_id,seq,qvals,tags,flags)
     
                 #assert (self.get(read_id) == mod_likelihoods).all(),"Mismatch on "+read_id
 
 if __name__ == '__main__':
     args=main()
-    mdb = MethylFile(args.output)
+    mdb = MethylFile(args.output,  output_likelihoods=("5mC","6mA") if args.likelihoods else [],
+            filter_mean_q=args.filter)
 
     import logging as log
     log.info(args)
