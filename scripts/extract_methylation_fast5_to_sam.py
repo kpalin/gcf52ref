@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 #-*- coding: utf-8 -*-
  
-"""Extract methylation from fast5 files into a RocksDB file. Also has an interface to read those values.
+"""Extract methylation from fast5 files into a sam file. 
 
 Created on Thursday, 25. July 2019.
 """
@@ -15,8 +15,15 @@ def main():
                         help="Input paths of fast5 files  [default:%(default)s]",
                         )
     parser.add_argument("-o", "--output",
-                        help="Output the unsorted SAM file here  [default:Standard output]",
-                        default=None)
+                        help="Output the unsorted SAM or passing reads fastq file file here  [default:%(default)s]",
+                        default="/dev/stdout")
+
+    parser.add_argument("-f", "--fastq",nargs='?',
+                        help="Produce output in fastq format instead of SAM. Store SAM header to file named here.  [default:%(default)s const:%(const)s]",
+                        const="/dev/null")
+    parser.add_argument("--failed_reads",
+                        help="Output failed reads in fastq format here. With SAM output, the filter/fail is marked with flag  [default:%(default)s]",
+                        default="/dev/stderr")                        
     #parser.add_argument("-p", "--processes",type=int,
     #                    help="Database to store the modifications to  [default:%(default)s]",
     #                    default=1)
@@ -27,17 +34,18 @@ def main():
     parser.add_argument("-F", "--filter",default=False,const=7.0, nargs="?",type=float,
                         help="Mark reads with average q less than this as vendor failed [default:%(default)s]" )
 
-    parser.add_argument("-V", "--verbose",default=False,action="store_true",
-                        help="Be more verbose with output [default:%(default)s]" )
+    parser.add_argument("-V", "--verbose",default=0,action="count",
+                        help="Be more (and more) verbose with output [default:%(default)s]" )
 
     args = parser.parse_args()
 
     import logging
-    if args.verbose:
+    if args.verbose > 0:
         logging.basicConfig(level=logging.INFO,
                             format='%(asctime)s:%(funcName)s:%(levelname)s:%(message)s')
 
 
+    logging.info(args)
     return args
 
 
@@ -47,26 +55,35 @@ class MethylFile(object):
     _KNOWN_MODIFICATIONS = {"5mC":(b'C','m'),
                             "6mA":(b'A','a')}
 
-    def __init__(self,out_strm=None, output_likelihoods=[], filter_mean_q = False ):
+    def __init__(self,out_strm=None, output_likelihoods=[], filter_mean_q = False, fastq_output=None, failed_reads=None, header=None, verbose=False ):
         """out_strm: Output stream for the sam file, default sys.stdout,
         output_likelihoods:  Output the raw likelihoods for the given modifications"""
         import sys
 
         self._output_likelihoods = output_likelihoods
         self._filter_mean_q = filter_mean_q
+        self.verbose = verbose
+
+        self._fastq_output = fastq_output
+        self._fail_strm = failed_reads
+        self._header_strm = header
+
 
         if out_strm is None:
             self._out_strm = sys.stdout
         else:
             self._out_strm = out_strm
+        
+        
 
         self._read_count = 0
         self._quantiles = []
-        import pandas as pd
+        
         import numpy as np
-        self._ll_distrib = pd.Series(np.zeros(256))
         self._cpg_meth = 0  
         self._cpg_total = 0
+        import logging as log
+        log.info(self.__dict__)
          
     def write_header(self):
         import json
@@ -78,16 +95,26 @@ class MethylFile(object):
         self._flow_cell_id = self._tracking_id["flow_cell_id"]
         self._distribution_version = self._tracking_id["distribution_version"] 
 
+        attribs = {"tracking_id":self._tracking_id,
+                "basecall_attributes":self._basecall_attributes,
+                "modification_attributes":self._mod_attributes}
+
+
         self._sam_header = ["@HD\tVN:1.6\tSO:unsorted",
                 "@PG\tID:extract_methylation_fast5_to_sam\tPN:extract_methylation_fast5_to_sam.py\tCL:{}""".format(" ".join(sys.argv)),
-                f"@RG\tID:{self._rgid}\tPL:ONT\tDT:{self._exp_start_time}\tPU:{self._flow_cell_id}\tSM:{self._sample_id}",
-                "@CO\ttracking_id={}".format(json.dumps(self._tracking_id)),
-                "@CO\tbasecall_attrib={}".format(json.dumps(self._basecall_attributes)),
-                "@CO\tmodification_attrib={}".format(json.dumps(self._mod_attributes))
+                "\t".join( [ f"@RG\tID:{self._rgid}",
+                        "PL:ONT",
+                        f"DT:{self._exp_start_time}",
+                        f"PU:{self._flow_cell_id}",f"SM:{self._sample_id}",
+                        "on:Z:{}".format(json.dumps(attribs) ) ] )
         ]
 
-        
-        self._out_strm.write("\n".join(self._sam_header)+"\n")
+        if self._header_strm:
+            head_out = self._header_strm
+        else:
+            head_out = self._out_strm
+        head_out.write("\n".join(self._sam_header)+"\n")
+        head_out.flush()
 
 
     def flush(self):
@@ -158,7 +185,7 @@ class MethylFile(object):
             MPtag.extend(chr(x) for x in (phred_posteriors[mod_base_loci]+33))
 
 
-            if True and unmod_base==b'C' and mod_symbol=="m":
+            if self.verbose>1 and unmod_base==b'C' and mod_symbol=="m":
                 import pandas as pd
                 import re
                 Mdf = pd.DataFrame(mod_base_table,columns=list(self._mod_attributes["output_alphabet"]))
@@ -184,6 +211,9 @@ class MethylFile(object):
                 #    log.info("70%meth:"+str(pd.Series(self._quantiles).describe()))
 
                 l_count = CpG_posterior.value_counts()
+                if not hasattr(self,"_ll_distrib"):
+                    self._ll_distrib = pd.Series(np.zeros(256))
+
                 self._ll_distrib[l_count.index] += l_count
                 if (self._read_count+1)%1000 == 0 :
                     X=self._ll_distrib[self._ll_distrib>0].copy()
@@ -197,15 +227,35 @@ class MethylFile(object):
         return tags
 
  
-    def write_read(self,QNAME,SEQ,QUAL,tags = [],flags = 0 ):
+    def write_read_fastq(self,QNAME,SEQ,QUAL,tags = [],flags = 0 ):
+        if (flags&0x200) == 0:
+            outstrm = self._out_strm
+        else:
+            if self._fail_strm:
+                outstrm = self._fail_strm
+            else:
+                return
+
+        outstrm.write("@"+QNAME)
+
+        for tag in tags:
+            outstrm.write(" ")
+            outstrm.write(tag)
+        outstrm.write("\n")
+        outstrm.write(SEQ)
+        outstrm.write("\n+\n")
+        outstrm.write(QUAL)
+        outstrm.write("\n")
+
+
+
+    def write_read_sam(self,QNAME,SEQ,QUAL,tags = [],flags = 0 ):
         """mod_base_indices = dict(UNMODIFIED_BASE = (COLUMN_INDEX,BASE_MOD_SYMBOL))
         
         The methylation is reported as described in https://283-3666509-gh.circle-artifacts.com/0/root/project/pdfs/SAMtags.pdf
         """
-        import numpy as np
 
-        if self._read_count == 0 :
-            self.write_header()
+
 
         # TODO: avoid repeating these
         FLAG=0x4|flags
@@ -220,15 +270,21 @@ class MethylFile(object):
         tags = [f"RG:Z:{self._rgid}"] + tags
 
         line = list(str(x) for x in [QNAME,FLAG,RNAME,POS,MAPQ,CIGAR,RNEXT,PNEXT,TLEN,SEQ,QUAL])
-        
-       
-        
+
         self._out_strm.write("\t".join(line+tags)+"\n")
 
+    def write_read(self,QNAME,SEQ,QUAL,tags = [],flags = 0 ):
+        if self._read_count == 0 :
+            self.write_header()
+
+        if self._fastq_output:
+            self.write_read_fastq(QNAME,SEQ,QUAL,tags,flags)
+        else:
+            self.write_read_sam(QNAME,SEQ,QUAL,tags,flags)
         
         self._read_count += 1
 
-    def update_fast5(self,fast5_filepath,analysis_id=None,mod_index=3,verbose=False):
+    def update_fast5(self,fast5_filepath,analysis_id=None,mod_index=3):
         """Update (i.e. add or change) the methylation data for reads in the given fast5 file.
         
         mod_index gives the index of the modification call table to store in the database. 
@@ -241,7 +297,7 @@ class MethylFile(object):
         
         def tqdm(x):
             return x
-        if verbose:
+        if self.verbose>0:
             try:
                 from tqdm import tqdm
             except ModuleNotFoundError:
@@ -322,10 +378,14 @@ class MethylFile(object):
 
 if __name__ == '__main__':
     args=main()
-    mdb = MethylFile(args.output,  output_likelihoods=("5mC","6mA") if args.likelihoods else [],
-            filter_mean_q=args.filter)
+
+    mdb = MethylFile(open(args.output,"wt"),  output_likelihoods=("5mC","6mA") if args.likelihoods else [],
+            filter_mean_q=args.filter,verbose=args.verbose, 
+            fastq_output=args.fastq if not args.fastq else open(args.fastq,"wt"),
+            header = False if not args.fastq else open(args.fastq,"wt"), 
+            failed_reads=None if not args.failed_reads else open(args.failed_reads,"wt"))
 
     import logging as log
     log.info(args)
     for fn in args.input_fast5:
-        mdb.update_fast5(fn,verbose=args.verbose)
+        mdb.update_fast5(fn)
