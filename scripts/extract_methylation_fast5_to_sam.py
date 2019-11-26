@@ -295,7 +295,7 @@ class MethylFile(object):
         import numpy as np
         import logging as log
         
-        def tqdm(x):
+        def tqdm(x,*args,**kwargs):
             return x
         if self.verbose>0:
             try:
@@ -316,7 +316,7 @@ class MethylFile(object):
         BaseMod = namedtuple("BaseMod","column_index shortName longName symbol unmodified_base")
         flags = 0
         with get_fast5_file(fast5_filepath, mode="r") as f5:
-            for read_id in tqdm(f5.get_read_ids()):
+            for read_id in tqdm(f5.get_read_ids(),mininterval=2.0):
                 #if read_idx%100:
                 #    log.info("Processing read {}".format(read_id))
 
