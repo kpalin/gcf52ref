@@ -71,4 +71,4 @@ cuda:\"${CUDA}\"}" >config.json
 
 cat config.json
 
-snakemake --cores=50 --snakefile ${SCRIPTBASE}/fast5_to_mapped_cram.smk -p --configfile config.json 
+snakemake --cores=85 --snakefile ${SCRIPTBASE}/fast5_to_mapped_cram_map_individual_split.smk -p --configfile config.json 
