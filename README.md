@@ -31,10 +31,14 @@ If you try out this script, do note: IT IS WHOLLY UNTESTED APART FROM OUTPUTTING
 Usage for this would be something like: Extract methylation data to SAM/CRAM, map to reference and merge methylation and alignment information (As usual, picard will probably give you most problems)
 
 ```bash
-python extract_methylation_fast5_to_sam.py -V -- PAD64960_*.fast5 | samtools sort -n -m 5G -@ 10 -O cram -o PAD64960.nsort.cram
-samtools fastq -@ 5 PAD64960.nsort.cram|minimap2 -x map-ont -a -t 50 GRCh38_no_alt.fasta - |samtools sort -O cram -@ 5 -m 15G --reference GRCh38_no_alt/GRCh38_no_alt.fasta  -o PAD64960.minimap2.sort.cram
+python extract_methylation_fast5_to_sam.py -V --fastq header.sam -o modcalls_pass.fastq \
+    --failed_reads modcalls_fail.fastq -L -F -- PAD64960_*.fast5
+
+RGID=$(sed -e '/^@RG/!d' header.sam)
+minimap2 -x map-ont -y -a  GRCh38_no_alt.fasta  modcalls_pass.fastq |
+samtools addreplacerg -r "${RGID}" /dev/stdin |
+samtools sort -O cram --reference GRCh38_no_alt.fasta  -o PAD64960.minimap2.sort.cram /dev/stdin
 samtools index PAD64960.minimap2.sort.cram
-picard -Xmx50G -Xms20G MergeBamAlignment R=GRCh38_no_alt.fasta ALIGNED=PAD64960.minimap2.sort.cram UNMAPPED=PAD64960.nsort.cram O=PAD64960s.minimap2.sort.meth.cram
 
 ```
 

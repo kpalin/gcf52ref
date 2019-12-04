@@ -1,5 +1,6 @@
-# This version splits the guppy runs.
+""# This version splits the guppy runs.
 
+SPLITS=list("0123")
 import os.path
 wildcard_constraints:
     type="pass|fail",
@@ -10,14 +11,24 @@ wildcard_constraints:
 
 report: "run_report/methylmapping.rst"
 
+
+rule sequencing_summary:
+    input:
+        guppy_done=expand("{split}/guppy_output/guppy.done",split=SPLITS)
+    output:
+        sequencing_summary="sequencing_summary.txt.gz"
+    shell:
+        "cat 0/guppy_output/sequencing_summary.txt <(tail --lines=+1 -q [123]/guppy_output/sequencing_summary.txt )|"
+        "gzip >{output.sequencing_summary}"
+
+
 rule all:
     input:
-        config["sampleid"]+".pass.minimap2.sort.cram",
-        config["sampleid"]+".fail.minimap2.sort.cram"
+        config["sampleid"]+".pass.minimap2.sort.stats",
+        config["sampleid"]+".fail.minimap2.sort.stats",
+        rules.sequencing_summary.output.sequencing_summary
     shell:  # This is fairly dangerous step. Might loose several days of work.
         "echo rm [0123]/guppy_output/workspace/*.fast5"
-
-
 
 
 rule copy_fast5:
@@ -42,28 +53,33 @@ rule link_fast5:
     input:
         fast5_file="input_fast5_copy/{new_fast5_name}.fast5"
     output:
-        split_file="{split}/input_fast5_copy/{new_fast5_name}.fast5"
+        split_file=temp("{split}/input_fast5_copy/{new_fast5_name}.fast5")
     shell:
         "ln {input.fast5_file} {output.split_file}"
 
 ruleorder: link_fast5 > copy_fast5 > uncompress_fast5
 
-
-def split_fast5s(wildcards):
+import functools
+@functools.lru_cache(10)
+def get_split_wildcards(split):
     import os.path
     fast5_path = os.path.join(config["fast5_path"],"fast5_{type}/{fast5name}.fast5{suffix,|.gz}")
     
     wcards = glob_wildcards(fast5_path)
     
-    split_idx = int(wildcards.split)
+    split_idx = int(split)
     s = slice(split_idx,None,4)
-    import itertools as it
-    
-    all_files =  expand("{split}/input_fast5_copy/{type}_{fast5name}{suffix}.fast5",zip,
-            split=it.repeat(wildcards.split,len(wcards.type[s])),
-            type=wcards.type[s],
+    return dict(type=wcards.type[s],
             fast5name=wcards.fast5name[s],
             suffix=wcards.suffix[s])
+
+def split_fast5s(wildcards):
+    import itertools as it
+    
+    split_files = get_split_wildcards(wildcards.split)
+    all_files =  expand("{split}/input_fast5_copy/{type}_{fast5name}{suffix}.fast5",zip,
+            split=it.repeat(wildcards.split,len(split_files["fast5name"])),
+            **split_files)
     
 
     return all_files
@@ -89,76 +105,104 @@ checkpoint call_methylation:
         """
 
 
+import functools
+@functools.lru_cache(10000)
+def _get_new_fast5_names(split):
+    import subprocess as sp
+    cmd = f"cut -f1 {split}/guppy_output/sequencing_summary.txt |uniq"
+    p = sp.Popen(cmd,shell=True,stdout=sp.PIPE,universal_newlines=True)
+    p.stdout.readline()
+    rest = [x.strip()[:-len(".fast5")] for x in p.stdout]
+    #print("fnames:"+" ".join(rest))
+    return rest
 
 
+def get_new_fast5_names(split):
+
+    checkpoint_output = checkpoints.call_methylation.get(split=split)
+    rest = _get_new_fast5_names(split)
+    return rest
 
 
-def get_aligned_files(wildcards):
-    for s in ["0","1","2","3"]:
-        checkpoint_output = checkpoints.call_methylation.get(split=s).output[0]
+def get_fastqs(wildcards):
+
+    #checkpoint_output = checkpoints.call_methylation.get(split=wildcards.split)
     
-    w = glob_wildcards("{split}/guppy_output/workspace/{new_fast5_name}.fast5")    
-    
-    fs = expand("mapped/{new_fast5_name}.{{type}}.minimap2.sort.bam",new_fast5_name=w.new_fast5_name)
+    w = get_new_fast5_names(wildcards.split) #glob_wildcards("{split}/guppy_output/workspace/{{new_fast5_name}}.fast5".format(split=wildcards.split))    
+    #{new_fast5_name}.pass_fastq
+    fs = expand("{{split}}/unmapped/{new_fast5_name}.{{type}}_fastq.gz",new_fast5_name=w)
     return fs
 
 def get_header(wildcards):
-    import os.path
+    #import os.path
 
 
-    checkpoint_output = checkpoints.call_methylation.get(split="0").output[0]
-    from snakemake.exceptions import IncompleteCheckpointException
-
-    out_path = "0/guppy_output/workspace/"
-    w = glob_wildcards(os.path.join(out_path+"{new_fast5_name}.fast5"))
-    return "unmapped/{new_fast5_name}.sam.header".format(new_fast5_name=w.new_fast5_name[0])
-
+    #checkpoint_output = checkpoints.call_methylation.get(split="0")
+    fname = get_new_fast5_names("0")[0]
+    #import glob
+    w = f"0/unmapped/{fname}.sam.header"
+    return w 
 
 
-def get_fast5(wildcards):
 
-
-    #checkpoint_output = checkpoints.call_methylation.get(**wildcards).output[0]
-    import glob
-    import os.path
-    files = list(glob.glob("[0123]/guppy_output/workspace/{new_fast5_name}.fast5".format(new_fast5_name=wildcards.new_fast5_name)))
-    splits = list(set(x.split("/")[0] for x in files))
-    return {"fast5s":files,
-        "guppy_done":[os.path.join(x,"/guppy_output/guppy.done") for x in splits]}
 
 rule extract_methylation_likelihood_filter_fastq:
     input:
-        unpack(get_fast5)
-        #guppy_done="a?/guppy_output/guppy.done" # This might be good, or not
+        fast5s="{split}/guppy_output/workspace/{new_fast5_name}.fast5",
+        guppy_done="{split}/guppy_output/guppy.done"
     output:
-        fastq_pass=pipe("unmapped/{new_fast5_name}.pass_fastq"),
-        fastq_fail=pipe("unmapped/{new_fast5_name}.fail_fastq"),
-        header="unmapped/{new_fast5_name}.sam.header"
+        fastq_pass=temp("{split}/unmapped/{new_fast5_name}.pass_fastq.gz"),
+        fastq_fail=temp("{split}/unmapped/{new_fast5_name}.fail_fastq.gz"),
+        header="{split}/unmapped/{new_fast5_name}.sam.header"
+    threads: 2  # Not really, at least 3 but we'll never get to use that much CPU
     shell:
         "python $(dirname {workflow.snakefile})/scripts/extract_methylation_fast5_to_sam.py --fastq {output.header} "
-        "-o {output.fastq_pass} --failed_reads {output.fastq_fail} -V -L -F -- {input.fast5s}"
+        "-o >(gzip > {output.fastq_pass} ) --failed_reads >(gzip >{output.fastq_fail}) -L -F -- {input.fast5s}"
+
+rule map_index:
+    input:
+        reference=config["reference_fasta"]
+    output:
+        ref_idx=temp("tmp/minimap2.map-ont.idx")
+    shell:
+        "minimap2 -x map-ont -d {output.ref_idx} {input.reference} "
 
 
+rule write_fastq_fofn:
+    input:
+        unmapped=get_fastqs
+    output:
+        fofn="{split}/mapped/fastq_{type}.fofn"
+    run:
+        open(output.fofn,"w").write("\n".join(input.unmapped))
+
+    
 
 rule map_fastq:
     input:
-        unmapped="unmapped/{new_fast5_name}.{type}_fastq",
-        reference=config["reference_fasta"]
+        unmapped_fofn="{split}/mapped/fastq_{type}.fofn",
+        reference=config["reference_fasta"],
+        ref_idx=rules.map_index.output.ref_idx
     output:
-        cram=temp("mapped/{new_fast5_name}.{type,pass|fail}.minimap2.sort.bam")
-    threads: 4
+        cram=temp("{split}/mapped/mapped.{type,pass|fail}.minimap2.sort.split.cram")
+    threads: 20
+    benchmark:
+        "{split}/mapped/mapped.{type,pass|fail}.minimap2.sort.split.time.txt"
+    log: 
+        sort="{split}/mapped/mapped.{type,pass|fail}.sort.log",
+        map="{split}/mapped/mapped.{type,pass|fail}.minimap2.log"
     shell:
-        "minimap2 -x map-ont -y -a -t 2  {input.reference} {input.unmapped} |"
-        "samtools sort -O bam -l 0  -@ 2 -m 15G --reference {input.reference}  -o {output.cram} /dev/stdin"
+        "cat {input.unmapped_fofn}|xargs zcat | minimap2 -x map-ont -y -a -t {threads}  {input.ref_idx} /dev/stdin 2>{log.map} |"
+        "samtools sort -O cram -l 9  -@ 6 -m 5G --reference {input.reference}  -o {output.cram} /dev/stdin 2>{log.sort}"
 
 
 rule merge_bams:
     input:
-        mapped=get_aligned_files,
+        mapped=expand("{split}/mapped/mapped.{{type}}.minimap2.sort.split.cram",split=list("0123")),
         guppy_done = expand("{split}/guppy_output/guppy.done",split=list("0123")),
         reference=config["reference_fasta"]
     output:
-        cram=temp(config["sampleid"]+".{type}.minimap2.sort.norg.bam")
+        cram=temp("{sample_id}.{type}.minimap2.sort.norg.bam")
     threads:
         10
     shell:
@@ -171,10 +215,24 @@ rule add_rg:
         reference=config["reference_fasta"],
         header=get_header
     output:
-        cram=protected(config["sampleid"]+".{type}.minimap2.sort.cram")
+        cram=protected("{sample_id}.{type}.minimap2.sort.cram")
     threads:
         10
     shell:
         "RGID=$(sed -e '/^@RG/!d' {input.header});"
         "samtools addreplacerg -r \"${{RGID}}\" -o {output.cram} -O cram --reference {input.reference} {input.mapped};"
         "samtools index {output.cram}"
+
+
+
+
+rule cram_stats:
+    input:
+        cram=rules.add_rg.output.cram,
+        reference=config["reference_fasta"]
+    output:
+        stats="{sample_id}.{type}.minimap2.sort.stats"
+    threads:
+        5
+    shell:
+        "samtools stats --threads {threads} --ref-seq {input.reference} {input.cram} > {output.stats}" 

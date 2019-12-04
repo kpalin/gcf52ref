@@ -9,7 +9,21 @@ Created on Thursday, 25. July 2019.
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="Extract methylation from fast5 files")
+    parser = argparse.ArgumentParser(description="""Extract base modifications from fast5 files called with Guppy 3.3. 
+
+
+    The modifications are provided as MM and MP tags conforming to https://github.com/samtools/hts-specs/pull/418/commits/11d7fb900b6d51417f59d7cd2cc8540c1b982590
+    
+    If requested, the modification likelihoods are provided in hex string tags such that ml:Z:C+m,ffff04,A+a,000093. 
+        The syntax is 
+
+        ml:Z:([ACGTN][-+][a-z],([0-9a-f][0-9a-f])+);)+
+
+        ml is the custom SAM tag, Z symbol for character string value. Next three groupings are as in 'Base modifications' 
+        in  https://github.com/samtools/hts-specs/pull/418 
+        Final group is the hexadecimal coded likelihood for the given type modification for each position in SEQ in 
+        the original strand. Note that the likelihoods are 'given the underlying base is called the one defined 
+        in the tag'. Each hexadecimal value ranging 00-ff is 255*P(data|base, modified).""")
     
     parser.add_argument("input_fast5",nargs="+",
                         help="Input paths of fast5 files  [default:%(default)s]",
@@ -19,17 +33,14 @@ def main():
                         default="/dev/stdout")
 
     parser.add_argument("-f", "--fastq",nargs='?',
-                        help="Produce output in fastq format instead of SAM. Store SAM header to file named here.  [default:%(default)s const:%(const)s]",
+                        help="Produce output in fastq format instead of SAM. Store SAM header to file named here. The SAM tags are stored as read comments that can be copied over to SAM [default:%(default)s const:%(const)s]",
                         const="/dev/null")
     parser.add_argument("--failed_reads",
                         help="Output failed reads in fastq format here. With SAM output, the filter/fail is marked with flag  [default:%(default)s]",
                         default="/dev/stderr")                        
-    #parser.add_argument("-p", "--processes",type=int,
-    #                    help="Database to store the modifications to  [default:%(default)s]",
-    #                    default=1)
 
     parser.add_argument("-L", "--likelihoods",default=False,action="store_true",
-                        help="Include also the raw likelihoods [default:%(default)s]" )
+                        help="Include also the raw likelihoods as 'ml' tag. [default:%(default)s]" )
 
     parser.add_argument("-F", "--filter",default=False,const=7.0, nargs="?",type=float,
                         help="Mark reads with average q less than this as vendor failed [default:%(default)s]" )
@@ -239,7 +250,7 @@ class MethylFile(object):
         outstrm.write("@"+QNAME)
 
         for tag in tags:
-            outstrm.write(" ")
+            outstrm.write("\t")
             outstrm.write(tag)
         outstrm.write("\n")
         outstrm.write(SEQ)
@@ -316,7 +327,7 @@ class MethylFile(object):
         BaseMod = namedtuple("BaseMod","column_index shortName longName symbol unmodified_base")
         flags = 0
         with get_fast5_file(fast5_filepath, mode="r") as f5:
-            for read_id in tqdm(f5.get_read_ids(),mininterval=2.0):
+            for read_id in tqdm(f5.get_read_ids(),mininterval=30.0):
                 #if read_idx%100:
                 #    log.info("Processing read {}".format(read_id))
 
