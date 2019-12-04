@@ -112,9 +112,10 @@ def _get_new_fast5_names(split):
     cmd = f"cut -f1 {split}/guppy_output/sequencing_summary.txt |uniq"
     p = sp.Popen(cmd,shell=True,stdout=sp.PIPE,universal_newlines=True)
     p.stdout.readline()
-    rest = [x.strip()[:-len(".fast5")] for x in p.stdout]
+    rest = set(x.strip()[:-len(".fast5")] for x in p.stdout)
+    #raise AttributeError(str(rest))
     #print("fnames:"+" ".join(rest))
-    return rest
+    return tuple(rest)
 
 
 def get_new_fast5_names(split):
