@@ -11,6 +11,14 @@ wildcard_constraints:
 
 report: "run_report/methylmapping.rst"
 
+rule all:
+    input:
+        config["sampleid"]+".pass.minimap2.sort.stats",
+        config["sampleid"]+".fail.minimap2.sort.stats",
+        "sequencing_summary.txt.gz"
+    shell:  # This is fairly dangerous step. Might loose several days of work.
+        "rm [0123]/guppy_output/workspace/*.fast5"
+
 
 rule sequencing_summary:
     input:
@@ -22,13 +30,6 @@ rule sequencing_summary:
         "gzip >{output.sequencing_summary}"
 
 
-rule all:
-    input:
-        config["sampleid"]+".pass.minimap2.sort.stats",
-        config["sampleid"]+".fail.minimap2.sort.stats",
-        rules.sequencing_summary.output.sequencing_summary
-    shell:  # This is fairly dangerous step. Might loose several days of work.
-        "echo rm [0123]/guppy_output/workspace/*.fast5"
 
 
 rule copy_fast5:
@@ -36,6 +37,8 @@ rule copy_fast5:
         fast5_file=os.path.join(config["fast5_path"],"fast5_{type}/{fast5name}.fast5")
     output:
         local_file=temp("{split}/input_fast5_copy/{type}_{fast5name}.fast5")
+    resources:
+        disk_io=10
     shell:
         "cp {input.fast5_file} {output.local_file};"
         "chmod a+rw {output.local_file}"
@@ -45,6 +48,8 @@ rule uncompress_fast5:
         fast5_file=os.path.join(config["fast5_path"],"fast5_{type}/{fast5name}.fast5.gz")
     output:
         local_file=temp("{split}/input_fast5_copy/{type}_{fast5name}.gz.fast5")
+    resources:
+        disk_io=10
     shell:
         "zcat {input.fast5_file} > {output.local_file};"
         "chmod a+rw {output.local_file}"
@@ -93,6 +98,7 @@ checkpoint call_methylation:
         flag=touch("{split,\d}/guppy_output/guppy.done")
     threads: 4
     benchmark: "{split}/guppy_output/guppy.time.txt"
+    log:"{split}/guppy_output/guppy.snake.log"
     shell:
         """
         RESUME=""
@@ -101,7 +107,7 @@ checkpoint call_methylation:
         fi
         
         flock $(which guppy_basecaller).{wildcards.split} /usr/bin/time -v guppy_basecaller $RESUME --gpu_runners_per_device  16 --config {config[guppy_config]} -x 'cuda:{wildcards.split}:100%'  \
-        --records_per_fastq 100000 --save_path {wildcards.split}/guppy_output/  --compress_fastq --fast5_out -i {wildcards.split}/input_fast5_copy/
+        --records_per_fastq 100000 --save_path {wildcards.split}/guppy_output/  --compress_fastq --fast5_out -i {wildcards.split}/input_fast5_copy/ 2>&1 |tee {log}
         """
 
 
@@ -112,9 +118,9 @@ def _get_new_fast5_names(split):
     cmd = f"cut -f1 {split}/guppy_output/sequencing_summary.txt |uniq"
     p = sp.Popen(cmd,shell=True,stdout=sp.PIPE,universal_newlines=True)
     p.stdout.readline()
-    rest = set(x.strip()[:-len(".fast5")] for x in p.stdout)
+    rest = set(x.strip()[:-len(".fast5")] for x in p.stdout if x.strip().endswith(".fast5"))
     #raise AttributeError(str(rest))
-    #print("fnames:"+" ".join(rest))
+    if split=="2":print("fnames:"+"\n".join(rest))
     return tuple(rest)
 
 
@@ -156,9 +162,13 @@ rule extract_methylation_likelihood_filter_fastq:
         fastq_fail=temp("{split}/unmapped/{new_fast5_name}.fail_fastq.gz"),
         header="{split}/unmapped/{new_fast5_name}.sam.header"
     threads: 2  # Not really, at least 3 but we'll never get to use that much CPU
+    log: "{split}/unmapped/{new_fast5_name}.log"
+    priority: 30
+    resources:
+        disk_io=3
     shell:
         "python $(dirname {workflow.snakefile})/scripts/extract_methylation_fast5_to_sam.py --fastq {output.header} "
-        "-o >(gzip > {output.fastq_pass} ) --failed_reads >(gzip >{output.fastq_fail}) -L -F -- {input.fast5s}"
+        "-o >(gzip > {output.fastq_pass} ) --failed_reads >(gzip >{output.fastq_fail}) -L -F -- {input.fast5s} 2>{log}"
 
 rule map_index:
     input:
@@ -171,17 +181,21 @@ rule map_index:
 
 rule write_fastq_fofn:
     input:
-        unmapped=get_fastqs
+        unmapped_fastqs=get_fastqs
     output:
         fofn="{split}/mapped/fastq_{type}.fofn"
     run:
-        open(output.fofn,"w").write("\n".join(input.unmapped))
+        print("Should write this: "+str(input.unmapped_fastqs))
+        open(output["fofn"],"w").write("\n".join(input.unmapped_fastqs))
+        print("Wrote:"+str(open(output["fofn"],"rt").read()))
+
 
     
 
 rule map_fastq:
     input:
-        unmapped_fofn="{split}/mapped/fastq_{type}.fofn",
+        #unmapped_fofn="{split}/mapped/fastq_{type}.fofn",
+        fastqs=get_fastqs,
         reference=config["reference_fasta"],
         ref_idx=rules.map_index.output.ref_idx
     output:
@@ -193,7 +207,7 @@ rule map_fastq:
         sort="{split}/mapped/mapped.{type,pass|fail}.sort.log",
         map="{split}/mapped/mapped.{type,pass|fail}.minimap2.log"
     shell:
-        "cat {input.unmapped_fofn}|xargs zcat | minimap2 -x map-ont -y -a -t {threads}  {input.ref_idx} /dev/stdin 2>{log.map} |"
+        "minimap2 -x map-ont -y -a -t {threads}  {input.ref_idx} {input.fastqs} 2>{log.map} |"
         "samtools sort -O cram -l 9  -@ 6 -m 5G --reference {input.reference}  -o {output.cram} /dev/stdin 2>{log.sort}"
 
 
