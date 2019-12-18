@@ -104,7 +104,6 @@ class MethylFile(object):
         self._exp_start_time = self._tracking_id["exp_start_time"]
         self._device_id = self._tracking_id["device_id"]
         self._flow_cell_id = self._tracking_id["flow_cell_id"]
-        self._distribution_version = self._tracking_id["distribution_version"] 
 
         attribs = {"tracking_id":self._tracking_id,
                 "basecall_attributes":self._basecall_attributes,
@@ -352,8 +351,14 @@ class MethylFile(object):
                     log.info(str(self._modified_base_names))
 
 
-                mod_base_table = read.get_analysis_dataset(
-                    analysis_id, 'BaseCalled_template/ModBaseProbs')
+                try:
+                    mod_base_table = read.get_analysis_dataset(
+                        analysis_id, 'BaseCalled_template/ModBaseProbs')
+                except KeyError as err:
+                    log.exception(err)
+                    log.error("No ModBaseProbs for read {}".format(read_id))
+                    continue
+
                 if mod_base_table is None:
                     log.info("No ModBaseProbs for {}".format(read_id))
                     continue
@@ -363,8 +368,13 @@ class MethylFile(object):
                 if fastq is None:
                     log.info("No Fastq for {}".format(read_id))
                     continue
-                    
-                seq_title,seq,_,qvals,_ = fastq.split("\n") 
+
+                try:   
+                    seq_title,seq,_,qvals,_ = fastq.split("\n")
+                except ValueError as err:
+                    log.exception(err)
+                    log.error("Bad Fastq for {}:\n{}".format(read_id,fastq))
+                    continue
 
                 
                 # import pandas as pd
