@@ -8,19 +8,21 @@ import sys
 
 def main():
     args = get_args()
-    print("\t".join(['chromosome', 'strand', 'start', 'end', 'read_name', ]))
+    print("\t".join(['chromosome', 'strand', 'start',
+                     'end', 'quality', 'read_name', 'modification']))
 
     cram = pysam.AlignmentFile(args.cram, "rc")
     for read in cram.fetch(reference=args.chrom, start=args.start, end=args.end):
         if not read.is_supplementary and not read.is_secondary:
-            positions, mod = get_modified_reference_positions(read)
-            for pos in positions:
+            mod, positions, qualities = get_modified_reference_positions(read)
+            for pos, qual in zip(positions, qualities):
                 if pos is not None:
-                    print("{chrom}\t{strand}\t{st}\t{en}\t{rname}\t{mod}".format(
+                    print("{chrom}\t{strand}\t{st}\t{en}\t{qual}\t{rname}\t{mod}".format(
                         chrom=read.reference_name,
                         strand='-' if read.is_reverse else '+',
                         st=pos,
                         en=pos,
+                        qual=qual,
                         rname=read.query_name,
                         mod=mod))
 
@@ -31,6 +33,7 @@ def get_modified_reference_positions(read):
         sys.exit("ERROR: modifications on negative strand currently unsupported.")
     base, mod = basemod.split('+')
     deltas = [int(i) for i in read.get_tag('MM').split(',')[1:]]
+    quals = [ord(i) - 33 for i in read.get_tag('MP')]
     locations = np.cumsum(deltas) + np.concatenate((np.zeros(shape=1),
                                                     np.ones(shape=len(deltas) - 1))).astype('int')
     base_index = np.array(
@@ -41,7 +44,7 @@ def get_modified_reference_positions(read):
     if read.is_reverse:
         return np.flipud(refpos)[modified_bases], basemod
     else:
-        return refpos[modified_bases], basemod
+        return basemod, refpos[modified_bases], quals
 
 
 def get_args():
