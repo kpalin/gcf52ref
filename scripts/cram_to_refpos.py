@@ -2,6 +2,7 @@
 
 import pysam
 import numpy as np
+from typing import Tuple,List
 from argparse import ArgumentParser
 import sys
 
@@ -27,7 +28,8 @@ def main():
                         mod=mod))
 
 
-def get_modified_reference_positions(read):
+
+def get_modified_reference_positions(read) -> Tuple[str,np.ndarray,List[int]]:
     basemod = read.get_tag('MM').split(',', 1)[0]
     if '-' in basemod:
         sys.exit("ERROR: modifications on negative strand currently unsupported.")
@@ -42,7 +44,7 @@ def get_modified_reference_positions(read):
     modified_bases = base_index[locations]
     refpos = np.array(read.get_reference_positions(full_length=True))
     if read.is_reverse:
-        return np.flipud(refpos)[modified_bases], basemod
+        return basemod, np.flipud(refpos)[modified_bases], quals[::-1]
     else:
         return basemod, refpos[modified_bases], quals
 
