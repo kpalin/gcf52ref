@@ -14,7 +14,7 @@ def main():
 
     cram = pysam.AlignmentFile(args.cram, "rc")
     for read in cram.fetch(reference=args.chrom, start=args.start, end=args.end):
-        if not read.is_supplementary and not read.is_secondary:
+        if read.has_tag('MM') and not read.is_supplementary and not read.is_secondary:
             mod, positions, qualities = get_modified_reference_positions(read)
             for pos, qual in zip(positions, qualities):
                 if pos is not None:
