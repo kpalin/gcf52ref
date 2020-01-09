@@ -15,7 +15,6 @@ set -o pipefail
 
 SCRIPTBASE=$(readlink -f $(dirname $0)/..)
 REFERENCE_FASTA="/data/reference-genomes/GRCh38_no_alt/GRCh38_no_alt.fasta"
-#FAST5PATH="/mnt/cgnano/projects/promethion/190715/c985_1_9835/20190715_1211_1-A3-D3_PAD64026_1b4dc69c/"
 
 
 GUPPY_CONFIG=$(readlink -f $HOME/ont-guppy/data/dna_r9.4.1_450bps_modbases_dam-dcm-cpg_hac.cfg )
@@ -24,13 +23,14 @@ usage()  {
     echo -e "usage:"
 echo "$0  -i input/path/for_fast5s/ -s SAMPLEID 
 -C all     GPU to use (0,1,2,3 or all, default $CUDA)
+-c guppy_config.cfg  Guppy configuration file. Default ${GUPPY_CONFIG}
 -s SAMPLEID  
 -h          Show this message and exit." >&2
     exit 1
 
 }
 
-while getopts  "i:s:C:hw:" flag
+while getopts  "i:s:C:hc:w:" flag
 do
     case "${flag}" in 
         s)
@@ -38,6 +38,9 @@ do
         ;;
         C)
               CUDA="${OPTARG}"
+        ;;        
+        c)
+              GUPPY_CONFIG="${OPTARG}"
         ;;        
         w)
             mkdir -p "${OPTARG}"
@@ -54,11 +57,7 @@ done
 shift $((OPTIND-1)); OPTIND=1
 
 
-#readlink -f ${@} |jq -nR '{methcalled_fast5:[inputs | select(length>0)]}' |\
-#jq ".timestamp=\"$(date -Is)\"|.reference_fasta=\"${REFERENCE_FASTA}\"|.sampleid=\"${SAMPLEID}\"" #>config.json
-
-
-#readlink -f ${@} |jq -nR  methcalled_fast5:[inputs | select(length>0)],'"
+test -e ${GUPPY_CONFIG}
 
 
 jq -nR "{timestamp:\"$(date -Is)\",

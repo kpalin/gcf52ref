@@ -96,7 +96,7 @@ checkpoint call_methylation:
         #basecalled=directory("guppy_output/"),
         #basecalled_f5=temp(directory("{split}/guppy_output/workspace/")),
         flag=touch("{split,\d}/guppy_output/guppy.done")
-    threads: 4
+    threads: 8
     benchmark: "{split}/guppy_output/guppy.time.txt"
     log:"{split}/guppy_output/guppy.snake.log"
     shell:
@@ -106,8 +106,9 @@ checkpoint call_methylation:
             RESUME="--resume"
         fi
         
-        flock $(which guppy_basecaller).{wildcards.split} /usr/bin/time -v guppy_basecaller $RESUME --gpu_runners_per_device  16 --config {config[guppy_config]} -x 'cuda:{wildcards.split}:100%'  \
-        --records_per_fastq 100000 --save_path {wildcards.split}/guppy_output/  --compress_fastq --fast5_out -i {wildcards.split}/input_fast5_copy/ 2>&1 |tee {log}
+        flock $(which guppy_basecaller).{wildcards.split} /usr/bin/time -v guppy_basecaller $RESUME  --config {config[guppy_config]} -x 'cuda:{wildcards.split}:100%'  \
+        --num_callers {threads} --gpu_runners_per_device 16 --chunks_per_runner 1024 \
+        --records_per_fastq 100000 --save_path $(readlink -f {wildcards.split}/guppy_output/ )  --compress_fastq --fast5_out -i $(readlink -f {wildcards.split}/input_fast5_copy/ ) 2>&1 |tee {log}
         """
 
 
