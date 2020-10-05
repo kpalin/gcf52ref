@@ -25,12 +25,13 @@ echo "$0  -i input/path/for_fast5s/ -s SAMPLEID
 -C all     GPU to use (0,1,2,3 or all, default $CUDA)
 -c guppy_config.cfg  Guppy configuration file. Default ${GUPPY_CONFIG}
 -s SAMPLEID  
+-K         Keep temporary files (except output )
 -h          Show this message and exit." >&2
     exit 1
 
 }
-
-while getopts  "i:s:C:hc:w:" flag
+CMDS=""
+while getopts  "i:s:C:hc:w:nK" flag
 do
     case "${flag}" in 
         s)
@@ -49,6 +50,12 @@ do
         i)
               FAST5PATH="${OPTARG}"
         ;;
+        K)
+            CMDS=${CMDS}" --notemp"
+        ;;
+        n)
+            CMDS=${CMDS}" -n"
+        ;;
         h|*)
               usage
         ;;
@@ -56,18 +63,21 @@ do
 done
 shift $((OPTIND-1)); OPTIND=1
 
+ls ${FAST5PATH}/sequencing_summary/*sequencing_summary.txt* || ls ${FAST5PATH}/*sequencing_summary.txt* || echo "WARNING: NO OLD sequencing_summary.txt FILES FOUND" >&2
 
 test -e ${GUPPY_CONFIG}
 
 
-jq -nR "{timestamp:\"$(date -Is)\",
+test -e config.json || (jq -nR "{timestamp:\"$(date -Is)\",
 reference_fasta:\"${REFERENCE_FASTA}\",
 sampleid:\"${SAMPLEID}\",
 guppy_config:\"${GUPPY_CONFIG}\",
 fast5_path:\"${FAST5PATH}\",
-cuda:\"${CUDA}\"}" >config.json
+cuda:\"${CUDA}\"}" >config.json )
 
 
 cat config.json
-
-snakemake --resources disk_io=100 --cores=60 --snakefile ${SCRIPTBASE}/fast5_to_mapped_cram_map_individual_split.smk -p --configfile config.json
+SLEEPTIME=$(( $RANDOM % 60))s
+echo Sleeping $SLEEPTIME
+#sleep $SLEEPTIME
+snakemake --latency-wait 60 --resources disk_io=100 ${CMDS:-} --rerun-incomplete --config nsplits=8 --cores=60 --snakefile ${SCRIPTBASE}/fast5_to_mapped_cram_map_individual_split.smk -p --configfile config.json
