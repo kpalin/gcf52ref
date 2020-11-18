@@ -106,9 +106,28 @@ optional arguments:
   -V, --verbose         Be more (and more) verbose with output [default:0]
 ```
 
+There is a also a script to convert the MM/MP tags to tsv similar to what nanopolish produces.
+```
+usage: cram_to_refpos.py [-h] [--chrom CHROM] [--start START] [--end END]
+                         [--reference_fasta REFERENCE_FASTA] [--no_header]
+                         cram
 
+convert ont-cram file with MM/MP tags to tsv
 
-There are various notes and to-do:s involved:
+positional arguments:
+  cram                  aligned cram file containing MM/MP tags
+
+optional arguments:
+  -h, --help            show this help message and exit
+  --chrom CHROM         chromosome to limit calls to.
+  --start START         start coordinates to limit calls from
+  --end END             end coordinates to limit calls from
+  --reference_fasta REFERENCE_FASTA
+                        indexed fasta file for reporting sequence context.
+  --no_header           Don't output header line
+  ```
+
+###There are various notes and to-do:s involved:
 
 - As *output* from the script, the MM/MP tags are reported correctly in the '+' strand with respect
   to the SEQ record in the SAM.  The suggested minimap2 (or essentially any) alignment will reverse
