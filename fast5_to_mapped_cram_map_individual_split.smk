@@ -1,4 +1,8 @@
 # This version splits the guppy runs.
+import logging
+logging.basicConfig(level=logging.DEBUG)
+
+
 
 nsplits = int(config.get("nsplits",4))
 SPLITS=[str(i) for i in range(nsplits)]
@@ -6,11 +10,27 @@ import os.path
 wildcard_constraints:
     type="pass|fail|skip",
     f5type="pass|fail",
-    fast5name="[a-zA-Z0-9_]+",
+    fast5name="[a-zA-Z0-9_-]+",
     suffix="|[.]gz",
     split="[{}]".format("".join(SPLITS))
 
 report: "run_report/methylmapping.rst"
+
+
+if "sftp_server" in config:
+    from snakemake.remote.SFTP import RemoteProvider
+    from paramiko import Agent
+    STORAGE_SERVER=config["sftp_server"]
+    #"10.110.9.8"
+    SFTP = RemoteProvider(private_key=Agent().get_keys()[0])
+    def input_fast5_fmt(pattern):
+        if isinstance(pattern,str):
+            pattern=[ pattern ]
+        return SFTP.remote([config["sftp_server"]+("" if x.startswith("/") else "/")+x for x in pattern])
+else:
+    def input_fast5_fmt(pattern):
+        return pattern
+
 
 rule all:
     input:
@@ -26,21 +46,24 @@ rule all:
 rule sequencing_summary:
     input:
         guppy_done=expand("{split}/guppy_output/guppy.done",split=SPLITS)
-#        sequencing_summary="{split}/guppy_output/sequencing_summary.txt".format(split=SPLITS[0]),
-#        sequencing_summaries_rest=expand("{split}/guppy_output/sequencing_summary.txt",split=SPLITS[1:])
     output:
         sequencing_summary="sequencing_summary.txt.gz"
     run:
-        #"cat {input.sequencing_summary} <(tail --lines=+1 -q {input.sequencing_summaries_rest} )|"
-        shell(f"cat {SPLITS[0]}/guppy_output/sequencing_summary.txt <(tail --lines=+1 -q "+" ".join( (x+"/guppy_output/sequencing_summary.txt")  for x in SPLITS[1:] ) + " )|" +
+        shell(f"cat <(head -1q {SPLITS[0]}/guppy_output/sequencing_summary.txt) <(tail --lines=+2 -q " +
+            " ".join( (x+"/guppy_output/sequencing_summary.txt")  for x in SPLITS ) + " )|" +
             "gzip >{output.sequencing_summary}")
+
+
+#        shell(f"cat {SPLITS[0]}/guppy_output/sequencing_summary.txt <(tail --lines=+1 -q " +
+#            " ".join( (x+"/guppy_output/sequencing_summary.txt")  for x in SPLITS[1:] ) + " )|" +
+#            "gzip >{output.sequencing_summary}")
 
 
 
 
 rule copy_fast5:
     input:
-        fast5_file=os.path.join(config["fast5_path"],"fast5_{type}/{fast5name}.fast5")
+        fast5_file=input_fast5_fmt(os.path.join(config["fast5_path"],"fast5_{type}/{fast5name}.fast5"))
     output:
         local_file=temp("{split}/input_fast5_copy/{type}_{fast5name}.fast5")
     resources:
@@ -51,7 +74,7 @@ rule copy_fast5:
 
 rule uncompress_fast5:
     input:
-        fast5_file=os.path.join(config["fast5_path"],"fast5_{type}/{fast5name}.fast5.gz")
+        fast5_file=input_fast5_fmt(os.path.join(config["fast5_path"],"fast5_{type}/{fast5name}.fast5.gz"))
     output:
         local_file=temp("{split}/input_fast5_copy/{type}_{fast5name}.gz.fast5")
     resources:
@@ -77,9 +100,15 @@ def get_split_wildcards(split):
     info=snakemake.logger.info 
     
     info(f"split {split}")
-    fast5_path = os.path.join(config["fast5_path"],"fast5_{type}/{fast5name}.fast5{suffix,|.gz}")
-    info(str(fast5_path))    
-    wcards = glob_wildcards(fast5_path)
+    fast5_path = os.path.join(config["fast5_path"],"{justFast5,fast5_}{type}/{fast5name}.fast5{suffix,|.gz}")
+    info(str(fast5_path))
+    
+    if "sftp_server" in config:
+        _remote_path = config["sftp_server"]+str(fast5_path)
+        info(f"Remote path: {_remote_path}")
+        wcards = SFTP.glob_wildcards(_remote_path)
+    else:
+        wcards = glob_wildcards(fast5_path)
     info(str(wcards))
 
     split_idx = int(split)
@@ -147,20 +176,12 @@ def get_new_fast5_names(split):
 
 def get_fastqs(wildcards):
 
-    #checkpoint_output = checkpoints.call_methylation.get(split=wildcards.split)
-    
-    w = get_new_fast5_names(wildcards.split) #glob_wildcards("{split}/guppy_output/workspace/{{new_fast5_name}}.fast5".format(split=wildcards.split))    
-    #{new_fast5_name}.pass_fastq
+    w = get_new_fast5_names(wildcards.split) 
     fs = expand("{{split}}/unmapped/{new_fast5_name}.{{type}}_fastq.gz",new_fast5_name=w)
     return fs
 
 def get_header(wildcards):
-    #import os.path
-
-
-    #checkpoint_output = checkpoints.call_methylation.get(split="0")
     fname = get_new_fast5_names("0")[0]
-    #import glob
     w = f"0/unmapped/{fname}.sam.header"
     return w 
 
@@ -208,7 +229,6 @@ rule write_fastq_fofn:
 
 rule map_fastq:
     input:
-        #unmapped_fofn="{split}/mapped/fastq_{type}.fofn",
         fastqs=get_fastqs,
         reference=config["reference_fasta"],
         ref_idx=rules.map_index.output.ref_idx
