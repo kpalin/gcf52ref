@@ -5,7 +5,8 @@
 
 Created on Thursday, 25. July 2019.
 """
-
+import numpy as np
+import pandas as pd
 
 def main():
     import argparse
@@ -70,7 +71,8 @@ class MethylFile(object):
         """out_strm: Output stream for the sam file, default sys.stdout,
         output_likelihoods:  Output the raw likelihoods for the given modifications"""
         import sys
-
+        import logging as log
+        
         self._output_likelihoods = output_likelihoods
         self._filter_mean_q = filter_mean_q
         self.verbose = verbose
@@ -90,10 +92,9 @@ class MethylFile(object):
         self._read_count = 0
         self._quantiles = []
         
-        import numpy as np
         self._cpg_meth = 0  
         self._cpg_total = 0
-        import logging as log
+        
         log.info(self.__dict__)
          
     def write_header(self):
@@ -159,7 +160,9 @@ class MethylFile(object):
         "Return list of MM and MP tags conforming to https://github.com/samtools/hts-specs/pull/418/commits/11d7fb900b6d51417f59d7cd2cc8540c1b982590"
         # Require at least phred score 3 for modification to be called. That is at most 66% probability of error.
         # Other option would be phred score 4 with 45% error rate.
-        import numpy as np
+        
+        import re
+
         MIN_PHRED = 3 
 
         tags = []
@@ -196,8 +199,6 @@ class MethylFile(object):
 
 
             if self.verbose>1 and unmod_base==b'C' and mod_symbol=="m":
-                import pandas as pd
-                import re
                 Mdf = pd.DataFrame(mod_base_table,columns=list(self._mod_attributes["output_alphabet"]))
                 Mdf["CALL"] = list(SEQ)
                 Mdf["mod_posteriors"] = np.nan

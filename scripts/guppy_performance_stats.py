@@ -84,6 +84,6 @@ if __name__ == '__main__':
     for iname in args.input:
         l = GuppyLog(iname)
         if len(l.complete_times)>0:
-            print("{}: {:g} reads per second. Total {} reads in {} seconds, i.e. {:g} reads per second average.".format(iname, l.mean_rateHz(),
+            print("{}: {:g} seconds for each read. Total {} reads in {} seconds, i.e. {:g} reads per second average.".format(iname, 1.0/l.mean_rateHz(),
                 len(l),l.timespan().total_seconds(), len(l)/l.timespan().total_seconds()))
             #print(l)

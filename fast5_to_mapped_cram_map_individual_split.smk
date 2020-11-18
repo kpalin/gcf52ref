@@ -1,40 +1,69 @@
-""# This version splits the guppy runs.
+# This version splits the guppy runs.
+import logging
+logging.basicConfig(level=logging.DEBUG)
 
-SPLITS=list("0123")
+
+
+nsplits = int(config.get("nsplits",4))
+SPLITS=[str(i) for i in range(nsplits)]
 import os.path
 wildcard_constraints:
-    type="pass|fail",
+    type="pass|fail|skip",
     f5type="pass|fail",
-    fast5name="[a-zA-Z0-9_]+",
+    fast5name="[a-zA-Z0-9_-]+",
     suffix="|[.]gz",
-    split="[0123]"
+    split="[{}]".format("".join(SPLITS))
 
 report: "run_report/methylmapping.rst"
+
+
+if "sftp_server" in config:
+    from snakemake.remote.SFTP import RemoteProvider
+    from paramiko import Agent
+    STORAGE_SERVER=config["sftp_server"]
+    #"10.110.9.8"
+    SFTP = RemoteProvider(private_key=Agent().get_keys()[0])
+    def input_fast5_fmt(pattern):
+        if isinstance(pattern,str):
+            pattern=[ pattern ]
+        return SFTP.remote([config["sftp_server"]+("" if x.startswith("/") else "/")+x for x in pattern])
+else:
+    def input_fast5_fmt(pattern):
+        return pattern
+
 
 rule all:
     input:
         config["sampleid"]+".pass.minimap2.sort.stats",
         config["sampleid"]+".fail.minimap2.sort.stats",
         "sequencing_summary.txt.gz"
-    shell:  # This is fairly dangerous step. Might loose several days of work.
-        "rm [0123]/guppy_output/workspace/*.fast5"
-
+    run:  # This is fairly dangerous step. Might loose several days of work.
+        from pathlib import Path
+        for s in SPLITS:
+            for f in Path(f"{s}/guppy_output/workspace/").glob("*.fast5"):
+                f.unlink()
 
 rule sequencing_summary:
     input:
         guppy_done=expand("{split}/guppy_output/guppy.done",split=SPLITS)
     output:
         sequencing_summary="sequencing_summary.txt.gz"
-    shell:
-        "cat 0/guppy_output/sequencing_summary.txt <(tail --lines=+1 -q [123]/guppy_output/sequencing_summary.txt )|"
-        "gzip >{output.sequencing_summary}"
+    run:
+        shell(f"cat <(head -1q {SPLITS[0]}/guppy_output/sequencing_summary.txt) <(tail --lines=+2 -q " +
+            " ".join( (x+"/guppy_output/sequencing_summary.txt")  for x in SPLITS ) + " )|" +
+            "gzip >{output.sequencing_summary}")
+
+
+#        shell(f"cat {SPLITS[0]}/guppy_output/sequencing_summary.txt <(tail --lines=+1 -q " +
+#            " ".join( (x+"/guppy_output/sequencing_summary.txt")  for x in SPLITS[1:] ) + " )|" +
+#            "gzip >{output.sequencing_summary}")
 
 
 
 
 rule copy_fast5:
     input:
-        fast5_file=os.path.join(config["fast5_path"],"fast5_{type}/{fast5name}.fast5")
+        fast5_file=input_fast5_fmt(os.path.join(config["fast5_path"],"fast5_{type}/{fast5name}.fast5"))
     output:
         local_file=temp("{split}/input_fast5_copy/{type}_{fast5name}.fast5")
     resources:
@@ -45,7 +74,7 @@ rule copy_fast5:
 
 rule uncompress_fast5:
     input:
-        fast5_file=os.path.join(config["fast5_path"],"fast5_{type}/{fast5name}.fast5.gz")
+        fast5_file=input_fast5_fmt(os.path.join(config["fast5_path"],"fast5_{type}/{fast5name}.fast5.gz"))
     output:
         local_file=temp("{split}/input_fast5_copy/{type}_{fast5name}.gz.fast5")
     resources:
@@ -54,29 +83,43 @@ rule uncompress_fast5:
         "zcat {input.fast5_file} > {output.local_file};"
         "chmod a+rw {output.local_file}"
 
-rule link_fast5:
-    input:
-        fast5_file="input_fast5_copy/{new_fast5_name}.fast5"
-    output:
-        split_file=temp("{split}/input_fast5_copy/{new_fast5_name}.fast5")
-    shell:
-        "ln {input.fast5_file} {output.split_file}"
+#rule link_fast5:
+#    input:
+#        fast5_file="input_fast5_copy/{new_fast5_name}.fast5"
+#    output:
+#        split_file=temp("{split}/input_fast5_copy/{new_fast5_name}.fast5")
+#    shell:
+#        "ln {input.fast5_file} {output.split_file}"
 
-ruleorder: link_fast5 > copy_fast5 > uncompress_fast5
+ruleorder: copy_fast5 > uncompress_fast5
 
 import functools
 @functools.lru_cache(10)
 def get_split_wildcards(split):
     import os.path
-    fast5_path = os.path.join(config["fast5_path"],"fast5_{type}/{fast5name}.fast5{suffix,|.gz}")
+    info=snakemake.logger.info 
     
-    wcards = glob_wildcards(fast5_path)
+    info(f"split {split}")
+    fast5_path = os.path.join(config["fast5_path"],"{justFast5,fast5_}{type}/{fast5name}.fast5{suffix,|.gz}")
+    info(str(fast5_path))
     
+    if "sftp_server" in config:
+        _remote_path = config["sftp_server"]+str(fast5_path)
+        info(f"Remote path: {_remote_path}")
+        wcards = SFTP.glob_wildcards(_remote_path)
+    else:
+        wcards = glob_wildcards(fast5_path)
+    info(str(wcards))
+
     split_idx = int(split)
-    s = slice(split_idx,None,4)
-    return dict(type=wcards.type[s],
+    s = slice(split_idx,None,len(SPLITS))
+    ret = dict(type=wcards.type[s],
             fast5name=wcards.fast5name[s],
             suffix=wcards.suffix[s])
+    
+    assert len(ret["fast5name"])>0, fast5_path
+    
+    return ret
 
 def split_fast5s(wildcards):
     import itertools as it
@@ -95,8 +138,9 @@ checkpoint call_methylation:
     output:
         #basecalled=directory("guppy_output/"),
         #basecalled_f5=temp(directory("{split}/guppy_output/workspace/")),
+#        sequencing_summary="{split}/guppy_output/sequencing_summary.txt",
         flag=touch("{split,\d}/guppy_output/guppy.done")
-    threads: 4
+    threads: 8
     benchmark: "{split}/guppy_output/guppy.time.txt"
     log:"{split}/guppy_output/guppy.snake.log"
     shell:
@@ -106,8 +150,9 @@ checkpoint call_methylation:
             RESUME="--resume"
         fi
         
-        flock $(which guppy_basecaller).{wildcards.split} /usr/bin/time -v guppy_basecaller $RESUME --gpu_runners_per_device  16 --config {config[guppy_config]} -x 'cuda:{wildcards.split}:100%'  \
-        --records_per_fastq 100000 --save_path {wildcards.split}/guppy_output/  --compress_fastq --fast5_out -i {wildcards.split}/input_fast5_copy/ 2>&1 |tee {log}
+        flock $(which guppy_basecaller).{wildcards.split} /usr/bin/time -v guppy_basecaller $RESUME  --config {config[guppy_config]} -x "cuda:$(( {wildcards.split} % 4 )):100%"  \
+        --num_callers {threads} --gpu_runners_per_device 16 --chunks_per_runner 512 \
+        --records_per_fastq 100000 --save_path $(readlink -f {wildcards.split}/guppy_output/ )  --compress_fastq --fast5_out -i $(readlink -f {wildcards.split}/input_fast5_copy/ ) 2>&1 |tee {log}
         """
 
 
@@ -119,8 +164,6 @@ def _get_new_fast5_names(split):
     p = sp.Popen(cmd,shell=True,stdout=sp.PIPE,universal_newlines=True)
     p.stdout.readline()
     rest = set(x.strip()[:-len(".fast5")] for x in p.stdout if x.strip().endswith(".fast5"))
-    #raise AttributeError(str(rest))
-    if split=="2":print("fnames:"+"\n".join(rest))
     return tuple(rest)
 
 
@@ -133,20 +176,12 @@ def get_new_fast5_names(split):
 
 def get_fastqs(wildcards):
 
-    #checkpoint_output = checkpoints.call_methylation.get(split=wildcards.split)
-    
-    w = get_new_fast5_names(wildcards.split) #glob_wildcards("{split}/guppy_output/workspace/{{new_fast5_name}}.fast5".format(split=wildcards.split))    
-    #{new_fast5_name}.pass_fastq
+    w = get_new_fast5_names(wildcards.split) 
     fs = expand("{{split}}/unmapped/{new_fast5_name}.{{type}}_fastq.gz",new_fast5_name=w)
     return fs
 
 def get_header(wildcards):
-    #import os.path
-
-
-    #checkpoint_output = checkpoints.call_methylation.get(split="0")
     fname = get_new_fast5_names("0")[0]
-    #import glob
     w = f"0/unmapped/{fname}.sam.header"
     return w 
 
@@ -194,7 +229,6 @@ rule write_fastq_fofn:
 
 rule map_fastq:
     input:
-        #unmapped_fofn="{split}/mapped/fastq_{type}.fofn",
         fastqs=get_fastqs,
         reference=config["reference_fasta"],
         ref_idx=rules.map_index.output.ref_idx
@@ -213,8 +247,8 @@ rule map_fastq:
 
 rule merge_bams:
     input:
-        mapped=expand("{split}/mapped/mapped.{{type}}.minimap2.sort.split.cram",split=list("0123")),
-        guppy_done = expand("{split}/guppy_output/guppy.done",split=list("0123")),
+        mapped=expand("{split}/mapped/mapped.{{type}}.minimap2.sort.split.cram",split=SPLITS),
+        guppy_done = expand("{split}/guppy_output/guppy.done",split=SPLITS),
         reference=config["reference_fasta"]
     output:
         cram=temp("{sample_id}.{type}.minimap2.sort.norg.bam")
@@ -235,7 +269,7 @@ rule add_rg:
         10
     shell:
         "RGID=$(sed -e '/^@RG/!d' {input.header});"
-        "samtools addreplacerg -r \"${{RGID}}\" -o {output.cram} -O cram --reference {input.reference} {input.mapped};"
+        "samtools addreplacerg --threads {threads} -r \"${{RGID}}\" -o {output.cram} -O cram --reference {input.reference} {input.mapped};"
         "samtools index {output.cram}"
 
 
@@ -248,6 +282,6 @@ rule cram_stats:
     output:
         stats="{sample_id}.{type}.minimap2.sort.stats"
     threads:
-        5
+        15
     shell:
         "samtools stats --threads {threads} --ref-seq {input.reference} {input.cram} > {output.stats}" 
